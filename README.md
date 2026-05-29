@@ -4,6 +4,16 @@ RAGMODEX is a molecular machine-learning workbench for predicting, explaining, a
 
 The project is structured as a portfolio-ready full-stack application: the frontend owns the product experience, while the backend exposes a focused API for molecular ML workflows.
 
+## Portfolio Highlights
+
+- Full-stack scientific web application built with React, TypeScript, FastAPI, and Python.
+- Applied machine-learning workflow for molecular bioactivity prediction using RDKit fingerprints, scikit-learn inference, and SHAP explainability.
+- Interactive modules for single-molecule prediction, molecular design, virtual screening, model evaluation, visualization, and RAG-assisted chat.
+- Domain-focused UX for cheminformatics workflows, with visual molecular previews, probability summaries, bit-level evidence, and model diagnostics.
+- Privacy-conscious public release: datasets, trained model artifacts, API keys, uploaded documents, and runtime sessions are intentionally excluded.
+
+This repository is a public portfolio version of RAGMODEX. Private datasets and trained model artifacts are not included; the application is designed to load user-provided models and datasets at runtime.
+
 ## Product Preview
 
 ### Chat-Guided Molecular Analysis
