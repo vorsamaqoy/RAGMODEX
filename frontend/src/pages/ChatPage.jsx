@@ -1,8 +1,8 @@
 ﻿import { useEffect, useRef, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { createPortal } from 'react-dom';
 import { TOKENS, MeshBackground, Glass, Label, Icon, Tab, ButtonGhost } from '../glass';
-import { chatSimple, comparePredictions, focusPredictionBit, getActiveOnMostAmbiguousBit, getBitDatabaseInfo, getEvaluation, getModelStatus, moleculeHighlightUrl, moleculeImageUrl, predict, streamChat } from '../lib/api';
+import { addRagDocument, chatSimple, clearRag, comparePredictions, deleteRagDocument, focusPredictionBit, getActiveOnMostAmbiguousBit, getBitDatabaseInfo, getEvaluation, getModelStatus, getRagStatus, moleculeHighlightUrl, moleculeImageUrl, predict, streamChat } from '../lib/api';
 import { useAppStore } from '../store';
 import { GlassLlmModelSelect } from '../components/GlassLlmModelSelect';
 import { GlassSettingsShortcut } from '../components/GlassSettingsShortcut';
@@ -209,6 +209,12 @@ const ExampleChip = ({ children, onClick }) => (
 const MOLECULE_TOKEN_RE = /(?:["'`](.+?)["'`])|(?:\b(?:[A-Z][a-z]?|c|n|o|s|p|\[[^\]]+\])(?:[A-Za-z0-9@+\-\[\]\(\)=#$:\/\\%.]{2,})\b)/g;
 const MOLECULE_MIN_CHARS = 3;
 const CANONICAL_SMILES_RE = /canonical\s+SMILES\s*[:=]\s*([^\s;,.]+)/i;
+const SMILES_WORD_BLOCKLIST = new Set([
+  'active', 'inactive', 'smiles', 'model', 'dataset', 'prediction', 'probability',
+  'describe', 'how', 'what', 'which', 'loaded', 'training', 'test', 'molecules',
+  'molecule', 'fingerprint', 'configuration', 'radius', 'number', 'bits', 'bbb',
+  'cyp', 'ecfp', 'ecfp6', 'maccs', 'shap',
+]);
 
 function cleanSmilesToken(value) {
   return (value ?? '').trim().replace(/^[`'"]+|[`'",.;:]+$/g, '');
@@ -218,8 +224,27 @@ function looksLikeStrongSmiles(value) {
   const token = cleanSmilesToken(value);
   if (token.length < MOLECULE_MIN_CHARS || /\s/.test(token)) return false;
   if (!/^[A-Za-z0-9@+\-\[\]\(\)=#$:\/\\%.]+$/.test(token)) return false;
-  if (/^(active|inactive|smiles|model|dataset|prediction|probability|bbb|cyp)$/i.test(token)) return false;
-  return /[cnosp]/.test(token) || /[\[\]\(\)=#@0-9]/.test(token);
+  if (SMILES_WORD_BLOCKLIST.has(token.toLowerCase())) return false;
+
+  const hasStructureMarker = /[\[\]\(\)=#@+\-/:\\%.0-9]/.test(token);
+  if (hasStructureMarker) return /[BCNOFPSIbcnops]/.test(token);
+
+  // Alphabetic SMILES like CCO are allowed, but ordinary words should not be
+  // treated as molecules just because they contain c/n/o/s/p letters.
+  let i = 0;
+  while (i < token.length) {
+    const two = token.slice(i, i + 2);
+    if (two === 'Cl' || two === 'Br') {
+      i += 2;
+      continue;
+    }
+    if ('BCNOFPSIbcopsn'.includes(token[i])) {
+      i += 1;
+      continue;
+    }
+    return false;
+  }
+  return true;
 }
 
 function extractQuerySmiles(text) {
@@ -1452,6 +1477,193 @@ const MoleculePreviewStrip = ({ content }) => {
   );
 };
 
+const formatFileSize = value => {
+  const size = Number(value ?? 0);
+  if (!size) return 'Size unknown';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const formatDate = value => {
+  if (!value) return 'Session source';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Session source';
+  return date.toLocaleDateString(undefined, { month: 'short', day: '2-digit' });
+};
+
+const SourceDrawer = ({
+  open,
+  docs,
+  chunks,
+  uploading,
+  uploadProgress,
+  removingDocId,
+  onClose,
+  onAdd,
+  onRemove,
+  onClear,
+}) => (
+  <div style={{
+    position: 'absolute',
+    top: 126,
+    right: 20,
+    bottom: 92,
+    width: 352,
+    zIndex: 16,
+    transform: open ? 'translateX(0)' : 'translateX(calc(100% + 32px))',
+    opacity: open ? 1 : 0,
+    pointerEvents: open ? 'auto' : 'none',
+    transition: 'transform 220ms ease, opacity 180ms ease',
+  }}>
+    <Glass tone="A" radius={22} padding={0} style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div style={{ padding: '16px 16px 12px', borderBottom: '1px solid rgba(15,18,28,0.07)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <div>
+            <Label style={{ marginBottom: 7, color: TOKENS.accent }}>CONTEXT SOURCES</Label>
+            <div style={{ fontFamily: TOKENS.fontDisplay, fontSize: 21, fontWeight: 700, color: TOKENS.ink, letterSpacing: '-0.02em' }}>
+              {docs.length} document{docs.length === 1 ? '' : 's'}
+            </div>
+          </div>
+          <button type="button" onClick={onClose} title="Close sources" style={{
+            appearance: 'none', border: 'none', cursor: 'pointer',
+            width: 34, height: 34, borderRadius: 11,
+            display: 'grid', placeItems: 'center',
+            background: 'rgba(255,255,255,0.66)', color: TOKENS.inkMuted,
+            boxShadow: '0 1px 0 rgba(255,255,255,0.8) inset, 0 0 0 1px rgba(15,18,28,0.07)',
+          }}>
+            <Icon name="x" size={15}/>
+          </button>
+        </div>
+        <div style={{ marginTop: 10, display: 'flex', gap: 8, alignItems: 'center', fontFamily: TOKENS.fontText, fontSize: 12, color: TOKENS.inkMuted }}>
+          <span>{chunks} indexed chunks</span>
+          <span style={{ width: 4, height: 4, borderRadius: 99, background: TOKENS.inkFaint }} />
+          <span>Used in chat retrieval</span>
+        </div>
+      </div>
+
+      {uploading && (
+        <div style={{ padding: '12px 16px', borderBottom: '1px solid rgba(15,18,28,0.06)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 7, fontFamily: TOKENS.fontText, fontSize: 12, color: TOKENS.inkMuted, fontWeight: 600 }}>
+            <span>Indexing source</span>
+            <span>{uploadProgress}%</span>
+          </div>
+          <div style={{ height: 7, borderRadius: 99, overflow: 'hidden', background: 'rgba(15,18,28,0.08)' }}>
+            <div style={{
+              height: '100%',
+              width: `${uploadProgress}%`,
+              borderRadius: 99,
+              background: 'linear-gradient(90deg, oklch(66% 0.115 155), oklch(80% 0.13 90))',
+              transition: 'width 160ms ease',
+            }}/>
+          </div>
+        </div>
+      )}
+
+      <div style={{ padding: 14, overflowY: 'auto', flex: 1 }}>
+        {docs.length ? (
+          <div style={{ display: 'grid', gap: 10 }}>
+            {docs.map(doc => (
+              <div key={doc.id} style={{
+                padding: 12,
+                borderRadius: 14,
+                background: 'rgba(255,255,255,0.62)',
+                boxShadow: '0 1px 0 rgba(255,255,255,0.8) inset, 0 0 0 1px rgba(15,18,28,0.07)',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                  <div style={{
+                    width: 34, height: 34, borderRadius: 11,
+                    display: 'grid', placeItems: 'center',
+                    background: 'oklch(66% 0.115 155 / 0.14)',
+                    color: TOKENS.accentInk,
+                    flex: '0 0 auto',
+                  }}>
+                    <Icon name="file" size={16}/>
+                  </div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontFamily: TOKENS.fontText, fontSize: 13, fontWeight: 700, color: TOKENS.ink, lineHeight: 1.25, overflowWrap: 'anywhere' }}>
+                      {doc.name}
+                    </div>
+                    <div style={{ marginTop: 5, fontFamily: TOKENS.fontText, fontSize: 11.5, color: TOKENS.inkMuted }}>
+                      {(doc.type || 'doc').toUpperCase()} - {doc.chunk_count} chunks - {formatFileSize(doc.size_bytes)}
+                    </div>
+                    <div style={{ marginTop: 4, fontFamily: TOKENS.fontText, fontSize: 11, color: TOKENS.inkFaint }}>
+                      Added {formatDate(doc.uploaded_at)}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onRemove(doc.id)}
+                    disabled={removingDocId === doc.id}
+                    title="Remove this source"
+                    style={{
+                      appearance: 'none', border: 'none',
+                      width: 28, height: 28, borderRadius: 9,
+                      display: 'grid', placeItems: 'center',
+                      cursor: removingDocId === doc.id ? 'wait' : 'pointer',
+                      background: 'rgba(15,18,28,0.045)',
+                      color: TOKENS.inkMuted,
+                      flex: '0 0 auto',
+                    }}
+                  >
+                    <Icon name={removingDocId === doc.id ? 'sparkle' : 'x'} size={13}/>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{
+            minHeight: 220,
+            display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center',
+            textAlign: 'center', padding: 24,
+            color: TOKENS.inkMuted,
+          }}>
+            <div style={{
+              width: 52, height: 52, borderRadius: 16,
+              display: 'grid', placeItems: 'center',
+              background: 'rgba(255,255,255,0.66)',
+              color: TOKENS.accentInk,
+              boxShadow: '0 1px 0 rgba(255,255,255,0.8) inset, 0 0 0 1px rgba(15,18,28,0.07)',
+            }}>
+              <Icon name="file" size={22}/>
+            </div>
+            <div style={{ marginTop: 14, fontFamily: TOKENS.fontDisplay, fontSize: 20, fontWeight: 700, color: TOKENS.ink }}>No sources yet</div>
+            <div style={{ marginTop: 8, fontFamily: TOKENS.fontText, fontSize: 13, lineHeight: 1.45 }}>
+              Upload papers, notes, or protocol excerpts to ground answers in your own material.
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ padding: 14, borderTop: '1px solid rgba(15,18,28,0.07)', display: 'flex', gap: 8 }}>
+        <button type="button" onClick={onAdd} disabled={uploading} style={{
+          appearance: 'none', border: 'none', cursor: uploading ? 'wait' : 'pointer',
+          height: 38, borderRadius: 12, padding: '0 13px',
+          display: 'inline-flex', alignItems: 'center', gap: 8,
+          background: 'linear-gradient(180deg, oklch(70% 0.13 155), oklch(58% 0.13 155))',
+          color: '#fff',
+          fontFamily: TOKENS.fontText, fontSize: 12.5, fontWeight: 700,
+          boxShadow: '0 1px 0 rgba(255,255,255,0.35) inset, 0 0 0 1px oklch(48% 0.13 155 / 0.5)',
+        }}>
+          <Icon name="plus" size={14}/> Add source
+        </button>
+        <button type="button" onClick={onClear} disabled={!docs.length || uploading} style={{
+          appearance: 'none', border: 'none',
+          cursor: !docs.length || uploading ? 'not-allowed' : 'pointer',
+          height: 38, borderRadius: 12, padding: '0 12px',
+          background: 'rgba(255,255,255,0.62)',
+          color: !docs.length || uploading ? TOKENS.inkFaint : TOKENS.inkMuted,
+          fontFamily: TOKENS.fontText, fontSize: 12.5, fontWeight: 700,
+          boxShadow: '0 1px 0 rgba(255,255,255,0.8) inset, 0 0 0 1px rgba(15,18,28,0.07)',
+        }}>
+          Clear all
+        </button>
+      </div>
+    </Glass>
+  </div>
+);
+
 /* ---------- The page ---------- */
 const ChatPage = () => {
   const modelLoaded = useAppStore(s => s.modelLoaded);
@@ -1462,7 +1674,61 @@ const ChatPage = () => {
   const [currentChatId, setCurrentChatId] = useState(initialChatState.currentChatId ?? null);
   const [selectedChatIds, setSelectedChatIds] = useState([]);
   const [streaming, setStreaming] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadError, setUploadError] = useState(null);
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [removingDocId, setRemovingDocId] = useState(null);
   const bottomRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const queryClient = useQueryClient();
+  const ragStatusQ = useQuery({ queryKey: ['rag-status'], queryFn: getRagStatus, refetchInterval: 8000, retry: false });
+  const ragDocs = ragStatusQ.data?.documents ?? [];
+  const ragDocumentCount = Number(ragStatusQ.data?.n_documents ?? ragDocs.length);
+  const ragChunks = Number(ragStatusQ.data?.n_chunks ?? ragStatusQ.data?.n_docs ?? 0);
+  const ragHasDocs = ragDocumentCount > 0 || !!(ragStatusQ.data?.ready && ragChunks > 0) || !!ragStatusQ.data?.has_saved_index;
+
+  const handleFileUpload = async file => {
+    if (!file) return;
+    setUploading(true);
+    setUploadProgress(4);
+    setUploadError(null);
+    setSourcesOpen(true);
+    try {
+      await addRagDocument(file, progress => setUploadProgress(progress));
+      await queryClient.invalidateQueries({ queryKey: ['rag-status'] });
+    } catch (error) {
+      setUploadError(error?.message ?? 'Upload failed');
+      setTimeout(() => setUploadError(null), 4000);
+    } finally {
+      setTimeout(() => {
+        setUploading(false);
+        setUploadProgress(0);
+      }, 250);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleClearRag = async () => {
+    try {
+      await clearRag();
+      await queryClient.invalidateQueries({ queryKey: ['rag-status'] });
+      setSourcesOpen(false);
+    } catch { /* ignore */ }
+  };
+
+  const handleRemoveRagDocument = async docId => {
+    setRemovingDocId(docId);
+    try {
+      await deleteRagDocument(docId);
+      await queryClient.invalidateQueries({ queryKey: ['rag-status'] });
+    } catch (error) {
+      setUploadError(error?.message ?? 'Could not remove document');
+      setTimeout(() => setUploadError(null), 4000);
+    } finally {
+      setRemovingDocId(null);
+    }
+  };
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -1600,7 +1866,7 @@ const ChatPage = () => {
           onClearAll={clearAllChats}
         />
 
-        <div data-glass-main="chat" style={{ flex: 1, height: '100%', overflow: 'hidden', padding: '8px 20px 20px 4px', minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+        <div data-glass-main="chat" style={{ flex: 1, height: '100%', overflow: 'hidden', padding: '8px 20px 20px 4px', minWidth: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
           {/* Top bar */}
           <Glass tone="A" radius={20} padding={0} style={{ marginBottom: 22 }}>
             <ChatTopBar/>
@@ -1619,6 +1885,9 @@ const ChatPage = () => {
                 </div>
               </div>
               <div style={{ display: 'flex', gap: 10 }}>
+                <ButtonGhost icon="file" onClick={() => setSourcesOpen(current => !current)}>
+                  Sources {ragDocumentCount ? `(${ragDocumentCount})` : ''}
+                </ButtonGhost>
                 <ButtonGhost icon="layers" onClick={selectedChatIds.length ? clearSelectedChats : clearAllChats} disabled={!recentChats.length}>
                   {selectedChatIds.length ? 'Delete selected' : 'Clear history'}
                 </ButtonGhost>
@@ -1626,6 +1895,19 @@ const ChatPage = () => {
               </div>
             </div>
           </div>
+
+          <SourceDrawer
+            open={sourcesOpen}
+            docs={ragDocs}
+            chunks={ragChunks}
+            uploading={uploading}
+            uploadProgress={uploadProgress}
+            removingDocId={removingDocId}
+            onClose={() => setSourcesOpen(false)}
+            onAdd={() => fileInputRef.current?.click()}
+            onRemove={handleRemoveRagDocument}
+            onClear={handleClearRag}
+          />
 
           {/* Conversation area (empty state) */}
           <div style={{
@@ -1751,7 +2033,61 @@ const ChatPage = () => {
           <Glass tone="A" radius={22} padding={10} style={{
             display: 'flex', alignItems: 'center', gap: 10,
             flex: '0 0 auto',
+            position: 'relative',
           }}>
+            {/* Hidden file input for RAG document upload */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.txt,.md"
+              style={{ display: 'none' }}
+              onChange={event => handleFileUpload(event.target.files?.[0])}
+            />
+
+            {/* Upload document button */}
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+              title="Upload a document so the chat can cite your own source (PDF, TXT, MD)"
+              style={{
+                appearance: 'none', border: 'none',
+                cursor: uploading ? 'wait' : 'pointer',
+                width: 48, height: 48, borderRadius: 14,
+                background: 'rgba(255,255,255,0.62)',
+                color: uploading ? TOKENS.inkMuted : TOKENS.accentInk,
+                display: 'grid', placeItems: 'center', flex: '0 0 auto',
+                boxShadow: '0 1px 0 rgba(255,255,255,0.8) inset, 0 0 0 1px rgba(15,18,28,0.07)',
+              }}
+            >
+              <Icon name={uploading ? 'sparkle' : 'plus'} size={20}/>
+            </button>
+
+            {uploading && (
+              <div style={{
+                position: 'absolute', left: 10, right: 10, bottom: 'calc(100% + 8px)',
+                padding: '9px 11px', borderRadius: 12,
+                background: 'rgba(255,255,255,0.80)',
+                boxShadow: '0 1px 0 rgba(255,255,255,0.86) inset, 0 0 0 1px rgba(15,18,28,0.08), 0 12px 26px -18px rgba(15,18,28,0.5)',
+                backdropFilter: 'blur(24px) saturate(160%)',
+                WebkitBackdropFilter: 'blur(24px) saturate(160%)',
+                zIndex: 18,
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 7, fontFamily: TOKENS.fontText, fontSize: 12, color: TOKENS.inkMuted, fontWeight: 700 }}>
+                  <span>Uploading document</span>
+                  <span>{uploadProgress}%</span>
+                </div>
+                <div style={{ height: 7, borderRadius: 99, overflow: 'hidden', background: 'rgba(15,18,28,0.08)' }}>
+                  <div style={{
+                    width: `${uploadProgress}%`, height: '100%',
+                    borderRadius: 99,
+                    background: 'linear-gradient(90deg, oklch(66% 0.115 155), oklch(80% 0.13 90))',
+                    transition: 'width 160ms ease',
+                  }}/>
+                </div>
+              </div>
+            )}
+
             {/* Context chip cluster */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <div style={{
@@ -1774,7 +2110,53 @@ const ChatPage = () => {
                 <Icon name="cpu" size={12}/>
                 Model
               </div>
+              {ragHasDocs && (
+                <div onClick={() => setSourcesOpen(current => !current)} role="button" tabIndex={0} onKeyDown={event => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    setSourcesOpen(current => !current);
+                  }
+                }} style={{
+                  cursor: 'pointer',
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  padding: '5px 7px 5px 9px',
+                  background: 'oklch(66% 0.115 155 / 0.20)',
+                  borderRadius: 8,
+                  fontFamily: TOKENS.fontText, fontSize: 11.5, color: TOKENS.accentInk, fontWeight: 700,
+                }}>
+                  <Icon name="db" size={12}/>
+                  {ragDocumentCount ? `Sources · ${ragDocumentCount}` : `Chunks · ${ragChunks}`}
+                  <button
+                    type="button"
+                    onClick={event => {
+                      event.stopPropagation();
+                      handleClearRag();
+                    }}
+                    title="Remove all uploaded documents"
+                    style={{
+                      appearance: 'none', border: 'none', background: 'transparent',
+                      cursor: 'pointer', padding: 0, marginLeft: 2,
+                      color: TOKENS.accentInk, opacity: 0.7, display: 'grid', placeItems: 'center',
+                    }}
+                  >
+                    <Icon name="x" size={12}/>
+                  </button>
+                </div>
+              )}
             </div>
+
+            {/* Upload error toast */}
+            {uploadError && (
+              <div style={{
+                position: 'absolute', bottom: 'calc(100% + 8px)', left: 10,
+                padding: '7px 11px', borderRadius: 10,
+                background: 'rgba(190,42,28,0.10)', color: 'oklch(50% 0.17 25)',
+                fontFamily: TOKENS.fontText, fontSize: 12, fontWeight: 600,
+                boxShadow: '0 0 0 1px rgba(190,42,28,0.20)',
+              }}>
+                {uploadError}
+              </div>
+            )}
 
             {/* Input */}
             <textarea
@@ -1834,7 +2216,5 @@ const ChatPage = () => {
 };
 
 export default ChatPage;
-
-
 
 

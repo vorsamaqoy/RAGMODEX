@@ -1,11 +1,11 @@
-import { useState, useRef, useEffect } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { streamChat, chatSimple, predict, moleculeImageUrl } from '../lib/api'
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { streamChat, chatSimple, predict, moleculeImageUrl, addRagPdf, getRagStatus, clearRag } from '../lib/api'
 import { useAppStore } from '../store'
 import { Button } from '../components/ui/Button'
 import { Badge } from '../components/ui/Badge'
 import { ProbBar } from '../components/ui/ProbBar'
-import { Send, Bot, User, Sparkles, FlaskConical, BarChart3, Database, ArrowDown, ArrowUp } from 'lucide-react'
+import { Send, Bot, User, Sparkles, FlaskConical, BarChart3, Database, ArrowDown, ArrowUp, Paperclip, X, FileText, Loader2 } from 'lucide-react'
 import { cn } from '../lib/cn'
 
 // ── types ─────────────────────────────────────────────────────────────────────
@@ -239,6 +239,36 @@ function EmptyState({
   )
 }
 
+// ── RagDocsBadge ─────────────────────────────────────────────────────────────
+
+function RagDocsBadge({ onClear }: { onClear: () => void }) {
+  const { data } = useQuery({
+    queryKey: ['rag-status'],
+    queryFn: getRagStatus,
+    refetchInterval: 8000,
+  })
+
+  if (!data?.ready && !data?.has_saved_index) return null
+  const chunks = data?.n_docs ?? 0
+
+  return (
+    <div className="flex items-center gap-1.5 rounded-full border border-[oklch(48%_0.13_155_/_0.30)] bg-[oklch(66%_0.115_155_/_0.10)] px-3 py-1">
+      <FileText size={11} className="shrink-0 text-[var(--accent-green)]" />
+      <span className="text-[11px] font-medium text-[var(--accent-green)]">
+        {chunks > 0 ? `${chunks} chunks indexed` : 'Docs indexed'}
+      </span>
+      <button
+        type="button"
+        onClick={onClear}
+        className="ml-0.5 rounded-full p-0.5 text-text-disabled transition-colors hover:text-text-primary"
+        title="Remove indexed documents"
+      >
+        <X size={10} />
+      </button>
+    </div>
+  )
+}
+
 // ── ChatPage ──────────────────────────────────────────────────────────────────
 
 export function ChatPage() {
@@ -246,11 +276,37 @@ export function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const queryClient = useQueryClient()
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  const handleFileUpload = useCallback(async (file: File) => {
+    setUploading(true)
+    setUploadError(null)
+    try {
+      await addRagPdf(file)
+      await queryClient.invalidateQueries({ queryKey: ['rag-status'] })
+    } catch (e) {
+      setUploadError(e instanceof Error ? e.message : 'Upload failed')
+      setTimeout(() => setUploadError(null), 4000)
+    } finally {
+      setUploading(false)
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }, [queryClient])
+
+  const handleClearRag = useCallback(async () => {
+    try {
+      await clearRag()
+      await queryClient.invalidateQueries({ queryKey: ['rag-status'] })
+    } catch { /* ignore */ }
+  }, [queryClient])
 
   async function send() {
     const text = input.trim()
@@ -301,6 +357,7 @@ export function ChatPage() {
           <h1 className="t-page">Chat</h1>
           <p className="t-caption mt-0.5">Ask questions about molecules, predictions, and model explanations</p>
         </div>
+        <RagDocsBadge onClear={handleClearRag} />
       </div>
 
       {/* Messages */}
@@ -345,7 +402,46 @@ export function ChatPage() {
 
       {/* Input */}
       <div className="px-4 py-4 md:px-8" style={{ borderTop: '1px solid var(--border-subtle)' }}>
+        {uploadError && (
+          <div className="mx-auto mb-2 max-w-4xl rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[12px] text-red-600">
+            {uploadError}
+          </div>
+        )}
         <div className="mx-auto flex max-w-4xl items-center gap-3">
+          {/* Hidden file input */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf,.txt,.md"
+            className="hidden"
+            onChange={e => {
+              const file = e.target.files?.[0]
+              if (file) handleFileUpload(file)
+            }}
+          />
+
+          {/* Attach button */}
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            title="Upload a document to ground the chat (PDF, TXT, MD)"
+            className={cn(
+              'flex h-[4.25rem] w-11 shrink-0 flex-col items-center justify-center gap-1 rounded-2xl border transition-all',
+              uploading
+                ? 'cursor-not-allowed border-border-subtle bg-white/30 text-text-disabled'
+                : 'border-border-subtle bg-white/40 text-text-tertiary hover:border-[var(--glass-border-strong)] hover:bg-white/60 hover:text-text-primary',
+            )}
+          >
+            {uploading
+              ? <Loader2 size={16} className="animate-spin" />
+              : <Paperclip size={16} />
+            }
+            <span className="text-[9px] font-semibold uppercase tracking-wide leading-none">
+              {uploading ? '...' : 'Doc'}
+            </span>
+          </button>
+
           <textarea
             id="chat-input"
             aria-label="Chat message"

@@ -53,16 +53,65 @@ def _friendly_llm_error(exc: Exception) -> str:
     )
 
 
+_RAG_MIN_SCORE = 0.30  # cosine similarity threshold — chunks below this are not injected
+
+
 def _retrieve_context(message: str) -> str | None:
     if app_state.retriever is None:
         return None
     try:
         result = app_state.retriever.retrieve(message)
-        if getattr(result, "context", ""):
-            return result.context
+        relevant = [sr for sr in result.search_results if sr.score >= _RAG_MIN_SCORE]
+        if not relevant:
+            return None
+        parts = []
+        for i, sr in enumerate(relevant, 1):
+            parts.append(f"[{i}] (source: {sr.chunk.source})\n{sr.chunk.text}")
+        return "\n\n".join(parts)
     except Exception:
         return None
-    return None
+
+
+SMILES_BLOCKLIST = {
+    "active", "inactive", "smiles", "model", "dataset", "prediction", "probability",
+    "describe", "how", "what", "which", "loaded", "training", "test", "molecules",
+    "molecule", "fingerprint", "configuration", "radius", "number", "bits", "bbb",
+    "cyp", "ecfp", "ecfp6", "maccs", "shap",
+}
+
+
+def _clean_smiles_candidate(value: str | None) -> str:
+    return (value or "").strip().strip("`'\" \t\r\n,;:.?!")
+
+
+def _is_probable_smiles(value: str | None) -> bool:
+    token = _clean_smiles_candidate(value)
+    if len(token) < 2 or re.search(r"\s", token):
+        return False
+    if token.lower() in SMILES_BLOCKLIST:
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9@+\-\[\]\\/#%().=]+", token):
+        return False
+
+    has_structure_marker = bool(re.search(r"[\[\]\(\)=#@+\-\\/%.0-9]", token))
+    if has_structure_marker:
+        return bool(re.search(r"[BCNOFPSIbccnops]", token))
+
+    # Plain alphabetic SMILES such as CCO are valid, but ordinary words like
+    # "Describe" or "How" must not enter the prediction path.
+    i = 0
+    allowed_two = {"Cl", "Br"}
+    allowed_one = set("BCNOFPSIbcopsn")
+    while i < len(token):
+        two = token[i:i + 2]
+        if two in allowed_two:
+            i += 2
+            continue
+        if token[i] in allowed_one:
+            i += 1
+            continue
+        return False
+    return True
 
 
 def _extract_smiles(message: str) -> str | None:
@@ -80,8 +129,16 @@ def _extract_smiles(message: str) -> str | None:
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
-            return match.group(1).strip()
+            candidate = _clean_smiles_candidate(match.group(1))
+            if _is_probable_smiles(candidate):
+                return candidate
     return None
+
+
+def _resolve_smiles_context(smiles_context: str | None, message: str) -> str | None:
+    if _is_probable_smiles(smiles_context):
+        return _clean_smiles_candidate(smiles_context)
+    return _extract_smiles(message)
 
 
 def _extract_signed_bit_index(message: str) -> int | None:
@@ -991,7 +1048,7 @@ def _deterministic_response(message: str, smiles_context: str | None = None) -> 
             return response
 
     bit_index = _extract_signed_bit_index(message)
-    smiles = smiles_context or _extract_smiles(message)
+    smiles = _resolve_smiles_context(smiles_context, message)
 
     aggregate_bit = _aggregate_bit_response(message, smiles)
     if aggregate_bit:
@@ -1277,7 +1334,7 @@ async def _legacy_stream_response(message: str, rag_context: str | None) -> Asyn
 @router.post("/stream")
 async def chat_stream(req: ChatRequest):
     rag_context = _retrieve_context(req.message) if req.use_rag else None
-    smiles = req.smiles_context or _extract_smiles(req.message)
+    smiles = _resolve_smiles_context(req.smiles_context, req.message)
 
     return StreamingResponse(
         _stream_response(req.message, rag_context, smiles),
@@ -1290,7 +1347,7 @@ async def chat_stream(req: ChatRequest):
 def chat_simple(req: ChatRequest):
     """Non-streaming chat for short responses."""
     rag_context = _retrieve_context(req.message) if req.use_rag else None
-    smiles = req.smiles_context or _extract_smiles(req.message)
+    smiles = _resolve_smiles_context(req.smiles_context, req.message)
 
     deterministic = _deterministic_response(req.message, smiles)
     if deterministic is not None:

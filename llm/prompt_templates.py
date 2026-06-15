@@ -109,14 +109,16 @@ Formula: {formula}  MW: {mol_weight:.2f} Da
 
 Focus on notable functional groups and structural motifs. No code."""
 
-    RAG_CONTEXT_TEMPLATE = """Use the context below to answer the question. If not relevant, answer from chemistry knowledge.
+    RAG_CONTEXT_TEMPLATE = """Answer the question using ONLY the retrieved context below. \
+Do not use prior knowledge. If the context does not contain enough information to answer, \
+reply: "The indexed documents do not contain information on this topic."
 
-Context:
+Retrieved context:
 {context}
 
 Question: {question}
 
-Maximum 150 words. No code."""
+Maximum 150 words. No code. Cite the source number [N] when you use a chunk."""
 
     @staticmethod
     def format_maccs_prompt(key_number: int, smarts: str, description: str, category: str) -> str:

@@ -286,8 +286,56 @@ export const chatSimple = (message: string, use_rag = true, smiles_context?: str
 export const addRagPdf = (file: File) => {
   const fd = new FormData()
   fd.append('file', file)
-  return req<{ ok: boolean }>('/rag/add-pdf', { method: 'POST', body: fd })
+  return req<{ ok: boolean; filename?: string }>('/rag/add-pdf', { method: 'POST', body: fd })
 }
+
+export interface RagDocument {
+  id: string
+  name: string
+  source: string
+  type: string
+  chunk_count: number
+  size_bytes?: number | null
+  uploaded_at?: string | null
+  characters?: number
+}
+
+export const addRagDocument = (file: File, onProgress?: (progress: number) => void) =>
+  new Promise<{ ok: boolean; filename?: string; document?: RagDocument; chunks?: number }>((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    const fd = new FormData()
+    fd.append('file', file)
+    xhr.open('POST', `${BASE}/rag/add-pdf`)
+    xhr.upload.onprogress = event => {
+      if (!event.lengthComputable || !onProgress) return
+      onProgress(Math.min(98, Math.round((event.loaded / event.total) * 100)))
+    }
+    xhr.onload = () => {
+      let data: { detail?: string } & Record<string, unknown> = {}
+      try {
+        data = JSON.parse(xhr.responseText || '{}')
+      } catch {
+        data = { detail: xhr.responseText || xhr.statusText }
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress?.(100)
+        resolve(data as { ok: boolean; filename?: string; document?: RagDocument; chunks?: number })
+      } else {
+        reject(new Error(data.detail ?? xhr.statusText))
+      }
+    }
+    xhr.onerror = () => reject(new Error('Upload failed'))
+    xhr.send(fd)
+  })
+
+export const getRagStatus = () =>
+  req<{ ready: boolean; n_docs: number; n_chunks?: number; n_documents?: number; documents?: RagDocument[]; has_saved_index: boolean }>('/rag/status')
+
+export const clearRag = () =>
+  req<{ ok: boolean }>('/rag/clear', { method: 'DELETE' })
+
+export const deleteRagDocument = (documentId: string) =>
+  req<{ ok: boolean; removed_chunks: number }>(`/rag/documents/${encodeURIComponent(documentId)}`, { method: 'DELETE' })
 
 // ── Types ────────────────────────────────────────────────────────────────────
 export interface BitInfo {

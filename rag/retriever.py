@@ -167,6 +167,14 @@ class Retriever:
         """Clear all indexed documents."""
         self.vector_store.clear()
 
+    def list_documents(self) -> list[dict]:
+        """List indexed source documents."""
+        return self.vector_store.list_documents()
+
+    def remove_document(self, document_id: str) -> int:
+        """Remove an indexed source document."""
+        return self.vector_store.remove_chunks_by_document(document_id)
+
     @property
     def num_chunks(self) -> int:
         """Get total number of indexed chunks."""

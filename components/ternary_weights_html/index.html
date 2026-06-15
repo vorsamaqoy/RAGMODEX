@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  background: transparent;
+  padding: 4px 0 0;
+  overflow: hidden;
+}
+#wrap { display: flex; flex-direction: column; align-items: center; }
+#svgEl { display: block; touch-action: none; cursor: crosshair; }
+#readout {
+  margin-top: 8px;
+  font-family: ui-monospace, 'Cascadia Code', 'Courier New', monospace;
+  font-size: 13px;
+  color: #404040;
+  text-align: center;
+  letter-spacing: 0.02em;
+}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <svg id="svgEl"></svg>
+  <div id="readout">w_prob = 0.50 | w_div = 0.25 | w_ad = 0.25</div>
+</div>
+
+<script>
+/* ─────────────────────────────────────────────────────────────────────────────
+   Inline Streamlit component-lib protocol.
+   Replaces the unpkg CDN dependency — works offline and behind proxies.
+
+   Streamlit communicates via postMessage across the iframe boundary:
+     Component → Parent  { isStreamlitMessage: true, type: "streamlit:*", ... }
+     Parent → Component  { type: "streamlit:render", args: {...}, ... }
+   ───────────────────────────────────────────────────────────────────────── */
+const Streamlit = {
+  setComponentReady() {
+    window.parent.postMessage(
+      { isStreamlitMessage: true, type: "streamlit:componentReady", apiVersion: 1 },
+      "*"
+    );
+  },
+  setComponentValue(value) {
+    window.parent.postMessage(
+      { isStreamlitMessage: true, type: "streamlit:setComponentValue",
+        value, dataType: "json" },
+      "*"
+    );
+  },
+  setFrameHeight(height) {
+    window.parent.postMessage(
+      { isStreamlitMessage: true, type: "streamlit:setFrameHeight", height },
+      "*"
+    );
+  }
+};
+
+// Relay inbound postMessages as a "streamlit:render" CustomEvent
+window.addEventListener("message", e => {
+  if (e.data && e.data.type === "streamlit:render") {
+    window.dispatchEvent(new CustomEvent("streamlit:render", { detail: e.data }));
+  }
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Geometry
+   ───────────────────────────────────────────────────────────────────────── */
+(function () {
+  "use strict";
+
+  const SIDE = 300;
+  const H    = SIDE * Math.sqrt(3) / 2;   // ≈ 259.8
+  const PX   = 52;                         // horizontal padding (label room)
+  const PY   = 44;                         // top padding (apex label room)
+  const VB_W = SIDE + 2 * PX;             // 404
+  const VB_H = Math.ceil(H) + PY + 38;    // ≈ 342
+
+  // Barycentric (a=w_prob, b=w_div, c=w_ad) → SVG (x, y)
+  function toXY(a, b, c) {
+    return {
+      x: PX + 0.5 * (2 * c + b) * SIDE,
+      y: PY + H * (1 - b)
+    };
+  }
+
+  // SVG (x, y) → barycentric (a, b, c)
+  function toABC(svgX, svgY) {
+    const x = svgX - PX;
+    const y = svgY - PY;
+    const b = 1 - y / H;
+    const c = x / SIDE - b / 2;
+    const a = 1 - b - c;
+    return { a, b, c };
+  }
+
+  function inTriangle(a, b, c) {
+    return a >= -5e-3 && b >= -5e-3 && c >= -5e-3;
+  }
+
+  // Snap continuous (a,b,c) to the nearest 1/20-step integer triplet
+  function snapIJK(a, b, c) {
+    let i = Math.round(a * 20);
+    let j = Math.round(b * 20);
+    let k = Math.round(c * 20);
+    const drift = 20 - (i + j + k);
+    if (drift !== 0) {
+      const mx = Math.max(i, j, k);
+      if      (i === mx) i += drift;
+      else if (j === mx) j += drift;
+      else               k += drift;
+    }
+    return {
+      i: Math.max(0, Math.min(20, i)),
+      j: Math.max(0, Math.min(20, j)),
+      k: Math.max(0, Math.min(20, k))
+    };
+  }
+
+  /* ── SVG helpers ─────────────────────────────────────────────────────── */
+  const NS = "http://www.w3.org/2000/svg";
+
+  function mkEl(tag, attrs, parent) {
+    const e = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+
+  function mkLine(p1, p2, stroke, sw, parent) {
+    return mkEl("line", { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y,
+                           stroke, "stroke-width": sw }, parent);
+  }
+
+  function mkText(content, x, y, attrs, parent) {
+    const t = document.createElementNS(NS, "text");
+    for (const [k, v] of Object.entries(attrs)) t.setAttribute(k, v);
+    t.setAttribute("x", x); t.setAttribute("y", y);
+    t.textContent = content;
+    if (parent) parent.appendChild(t);
+    return t;
+  }
+
+  /* ── Build static SVG ────────────────────────────────────────────────── */
+  const svg = document.getElementById("svgEl");
+  svg.setAttribute("viewBox", `0 0 ${VB_W} ${VB_H}`);
+  svg.setAttribute("width",  VB_W);
+  svg.setAttribute("height", VB_H);
+
+  const gGrid    = mkEl("g", {}, svg);
+  const gOutline = mkEl("g", {}, svg);
+  const gLabels  = mkEl("g", {}, svg);
+  const gMarker  = mkEl("g", {}, svg);
+
+  // Vertices
+  const vA = toXY(1, 0, 0);   // bottom-left  — w_prob = 1
+  const vB = toXY(0, 1, 0);   // top          — w_div  = 1
+  const vC = toXY(0, 0, 1);   // bottom-right — w_ad   = 1
+
+  // Gridlines (minor at 0.05, major at 0.25)
+  for (let s = 1; s < 20; s++) {
+    const t     = s / 20;
+    const major = (s % 5 === 0);
+    const col   = major ? "#cccccc" : "#e8e8e8";
+    const sw    = major ? 1.0 : 0.5;
+
+    // a = t → parallel to BC
+    mkLine(toXY(t, 1 - t, 0), toXY(t, 0, 1 - t), col, sw, gGrid);
+    // b = t → parallel to AC
+    mkLine(toXY(1 - t, t, 0), toXY(0, t, 1 - t), col, sw, gGrid);
+    // c = t → parallel to AB
+    mkLine(toXY(1 - t, 0, t), toXY(0, 1 - t, t), col, sw, gGrid);
+  }
+
+  // Triangle outline
+  mkEl("polygon", {
+    points: `${vA.x},${vA.y} ${vB.x},${vB.y} ${vC.x},${vC.y}`,
+    fill: "none", stroke: "#303030", "stroke-width": 1.5, "stroke-linejoin": "round"
+  }, gOutline);
+
+  // Vertex labels
+  const LF = { "font-family": "system-ui,sans-serif", "font-size": 11,
+                fill: "#404040", "font-weight": 600 };
+  const SF = { "font-family": "system-ui,sans-serif", "font-size": 9,
+                fill: "#606060" };
+
+  mkText("Activity",  vA.x - 5, vA.y + 16, { ...LF, "text-anchor": "end" },    gLabels);
+  mkText("(w_prob)",  vA.x - 5, vA.y + 27, { ...SF, "text-anchor": "end" },    gLabels);
+  mkText("Diversity", vB.x,     vB.y - 18, { ...LF, "text-anchor": "middle" }, gLabels);
+  mkText("(w_div)",   vB.x,     vB.y - 7,  { ...SF, "text-anchor": "middle" }, gLabels);
+  const adL1 = mkText("AD score", vC.x + 5, vC.y + 16, { ...LF, "text-anchor": "start" }, gLabels);
+  const adL2 = mkText("(w_ad)",   vC.x + 5, vC.y + 27, { ...SF, "text-anchor": "start" }, gLabels);
+
+  // Tick labels at 0.25 / 0.50 / 0.75
+  const TF = { "font-family": "system-ui,sans-serif", "font-size": 9, fill: "#808080" };
+  [0.25, 0.50, 0.75].forEach(t => {
+    // Left edge (AB): w_prob = 1-t
+    const pAB = toXY(1 - t, t, 0);
+    mkText((1 - t).toFixed(2), pAB.x - 6, pAB.y + 3.5,
+           { ...TF, "text-anchor": "end" }, gLabels);
+    // Right edge (BC): w_div = 1-t
+    const pBC = toXY(0, 1 - t, t);
+    mkText((1 - t).toFixed(2), pBC.x + 6, pBC.y + 3.5,
+           { ...TF, "text-anchor": "start" }, gLabels);
+    // Bottom edge (AC): w_ad = t
+    const pAC = toXY(1 - t, 0, t);
+    mkText(t.toFixed(2), pAC.x, pAC.y + 14,
+           { ...TF, "text-anchor": "middle" }, gLabels);
+  });
+
+  // Diamond marker
+  const MH = 7;
+  mkEl("polygon", {
+    points: `0,${-MH} ${MH},0 0,${MH} ${-MH},0`,
+    fill: "#b86020", stroke: "white", "stroke-width": 2,
+    style: "cursor:grab"
+  }, gMarker);
+
+  /* ── Runtime state ───────────────────────────────────────────────────── */
+  let curI = 10, curJ = 5, curK = 5;
+  let dragging  = false;
+  let lockedC   = false;
+
+  function applyLock(i, j, k) {
+    if (!lockedC) return { i, j, k };
+    k = 0;
+    const s = i + j;
+    if (s === 0) return { i: 10, j: 10, k: 0 };
+    const ni = Math.max(0, Math.min(20, Math.round(i * 20 / s)));
+    return { i: ni, j: 20 - ni, k: 0 };
+  }
+
+  function updateMarker(i, j, k) {
+    curI = i; curJ = j; curK = k;
+    const { x, y } = toXY(i / 20, j / 20, k / 20);
+    gMarker.setAttribute("transform", `translate(${x.toFixed(1)},${y.toFixed(1)})`);
+    document.getElementById("readout").textContent =
+      `w_prob = ${(i / 20).toFixed(2)} | w_div = ${(j / 20).toFixed(2)} | w_ad = ${(k / 20).toFixed(2)}`;
+  }
+
+  updateMarker(curI, curJ, curK);
+
+  /* ── Pointer helpers ─────────────────────────────────────────────────── */
+  function getSVGCoords(e) {
+    const rect = svg.getBoundingClientRect();
+    const src  = e.changedTouches ? e.changedTouches[0] : e;
+    return {
+      x: (src.clientX - rect.left) * (VB_W / rect.width),
+      y: (src.clientY - rect.top)  * (VB_H / rect.height)
+    };
+  }
+
+  function processPoint(svgX, svgY) {
+    const { a, b, c } = toABC(svgX, svgY);
+    if (!inTriangle(a, b, c)) return null;
+    const raw = snapIJK(a, b, c);
+    return applyLock(raw.i, raw.j, raw.k);
+  }
+
+  /* ── Mouse events ────────────────────────────────────────────────────── */
+  svg.addEventListener("mousedown", e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const { x, y } = getSVGCoords(e);
+    const s = processPoint(x, y);
+    if (s) { dragging = true; updateMarker(s.i, s.j, s.k); }
+  });
+
+  window.addEventListener("mousemove", e => {
+    if (!dragging) return;
+    const { x, y } = getSVGCoords(e);
+    const s = processPoint(x, y);
+    if (s) updateMarker(s.i, s.j, s.k);
+  });
+
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    Streamlit.setComponentValue({ i: curI, j: curJ, k: curK });
+  });
+
+  /* ── Touch events ────────────────────────────────────────────────────── */
+  svg.addEventListener("touchstart", e => {
+    e.preventDefault();
+    const { x, y } = getSVGCoords(e);
+    const s = processPoint(x, y);
+    if (s) { dragging = true; updateMarker(s.i, s.j, s.k); }
+  }, { passive: false });
+
+  window.addEventListener("touchmove", e => {
+    if (!dragging) return;
+    e.preventDefault();
+    const { x, y } = getSVGCoords(e);
+    const s = processPoint(x, y);
+    if (s) updateMarker(s.i, s.j, s.k);
+  }, { passive: false });
+
+  window.addEventListener("touchend", () => {
+    if (!dragging) return;
+    dragging = false;
+    Streamlit.setComponentValue({ i: curI, j: curJ, k: curK });
+  });
+
+  /* ── Streamlit render handler ─────────────────────────────────────────── */
+  window.addEventListener("streamlit:render", e => {
+    const args = e.detail.args;
+
+    lockedC = !!args.locked_c;
+    const adColor = lockedC ? "#b8b8b8" : "#404040";
+    adL1.setAttribute("fill", adColor);
+    adL2.setAttribute("fill", adColor);
+
+    const wp = typeof args.w_prob === "number" ? args.w_prob : 0.50;
+    const wd = typeof args.w_div  === "number" ? args.w_div  : 0.25;
+    const wa = typeof args.w_ad   === "number" ? args.w_ad   : 0.25;
+    const raw = snapIJK(wp, wd, wa);
+    const pos = applyLock(raw.i, raw.j, raw.k);
+    updateMarker(pos.i, pos.j, pos.k);
+
+    Streamlit.setFrameHeight(VB_H + 44);
+  });
+
+  Streamlit.setComponentReady();
+
+})();
+</script>
+</body>
+</html>

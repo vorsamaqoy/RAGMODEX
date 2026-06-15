@@ -67,6 +67,66 @@ class VectorStore:
         # Store chunks
         self.chunks.extend(chunks)
 
+    def _rebuild_index(self) -> None:
+        """Rebuild FAISS from the current chunk list."""
+        self.index = None
+        if not self.chunks:
+            return
+
+        texts = [chunk.text for chunk in self.chunks]
+        embeddings = self.embedding_generator.embed_batch(texts)
+        dimension = embeddings.shape[1]
+        self.index = faiss.IndexFlatIP(dimension)
+        self.index.add(embeddings.astype(np.float32))
+
+    def remove_chunks_by_document(self, document_id: str) -> int:
+        """Remove all chunks matching a document id or source."""
+        if not document_id:
+            return 0
+
+        kept: list[DocumentChunk] = []
+        removed = 0
+        for chunk in self.chunks:
+            metadata = chunk.metadata or {}
+            if metadata.get("doc_id") == document_id or chunk.source == document_id:
+                removed += 1
+            else:
+                kept.append(chunk)
+
+        if removed:
+            self.chunks = kept
+            self._rebuild_index()
+        return removed
+
+    def list_documents(self) -> list[dict]:
+        """Return aggregate document metadata from stored chunks."""
+        documents: dict[str, dict] = {}
+
+        for chunk in self.chunks:
+            metadata = chunk.metadata or {}
+            doc_id = str(metadata.get("doc_id") or chunk.source)
+            doc = documents.setdefault(
+                doc_id,
+                {
+                    "id": doc_id,
+                    "name": metadata.get("filename") or Path(chunk.source).name or "document",
+                    "source": chunk.source,
+                    "type": metadata.get("extension") or Path(chunk.source).suffix.lower().lstrip(".") or "text",
+                    "chunk_count": 0,
+                    "size_bytes": metadata.get("size_bytes"),
+                    "uploaded_at": metadata.get("uploaded_at"),
+                    "characters": 0,
+                },
+            )
+            doc["chunk_count"] += 1
+            doc["characters"] += len(chunk.text or "")
+
+        return sorted(
+            documents.values(),
+            key=lambda item: (item.get("uploaded_at") or "", item.get("name") or ""),
+            reverse=True,
+        )
+
     def add_texts(
         self,
         texts: list[str],
