@@ -1,0 +1,23 @@
+# ── RAGMODEX backend: FastAPI + Uvicorn ──────────────────────────────────────
+FROM python:3.11-slim
+
+# System libraries required by RDKit / Pillow wheels for molecule rendering
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libxrender1 \
+        libxext6 \
+        libsm6 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python deps first so this layer is cached between code changes
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the application code (everything not excluded by .dockerignore)
+COPY . .
+
+EXPOSE 8000
+
+# No --reload in production; data/ and models/ come in as mounted volumes
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,25 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    # Le chiavi LLM si inseriscono dall'UI dell'app, non qui.
+    # Il .env viene montato (non copiato nell'immagine) così la funzione
+    # "persist key" salva le chiavi sull'host e sopravvivono ai riavvii.
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./.env:/app/.env
+    ports:
+      - "8000:8000"   # API + Swagger docs su http://localhost:8000/docs
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "8080:80"     # app su http://localhost:8080
+    depends_on:
+      - backend
+    restart: unless-stopped

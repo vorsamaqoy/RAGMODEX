@@ -22,7 +22,9 @@ env/
 .molchat_session.pkl
 
 # Generated runtime data and local datasets
-data/
+# Ignore everything under data/ (user sessions, uploads); the example seed
+# data is re-included at the bottom of this file so the app ships a demo.
+data/*
 GLUT-1 data/
 polymer_data/
 models/
@@ -83,3 +85,13 @@ lpt2
 =*
 _ul
 how --stat *
+
+# ── Example seed data: ship a working demo when the repo is cloned ──
+# Re-includes the trained example model and the datasets, overriding the
+# data/* and *.bin/*.pkl/*.npz/*.faiss ignores above. The RAG index stays
+# ignored: each user uploads their own documentation in-app.
+# User uploads (data/uploads/) and future sessions stay ignored too.
+!data/session/
+!data/session/**
+!data/train_set.csv
+!data/test_set.csv

@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Secrets (injected at runtime via env_file, never baked into the image)
+.env
+.env.*
+!.env.example
+
+# Runtime data and local datasets (mounted as volumes instead)
+data/
+models/
+GLUT-1 data/
+polymer_data/
+
+# Local analysis artifacts
+benchmark/
+benchmark_inputs/
+benchmark_outputs/
+handoff/
+handoff-landing/
+notebooks/
+*.log
+
+# Misc
+.git/
+.gitignore
+.claude/
+_public_release/
+_ul/

@@ -1,0 +1,9 @@
+{
+  "model_name": "best_model.pkl",
+  "fp_radius": 3,
+  "fp_nbits": 2048,
+  "n_molecules": 1016,
+  "n_test": 0,
+  "manual_save": true,
+  "saved_at": "2026-06-04T15:13:06.395022+00:00"
+}
